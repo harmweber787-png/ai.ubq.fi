@@ -2426,3 +2426,11 @@ Reason: the 1000-line crate cap improves reviewability but does not prove compil
 Reversal risk: enabling broad lint groups or lowering a lint from deny to warn under `-D warnings` stages nothing; using `--cap-lints` or `continue-on-error` hides real failures. Changing `[profile.release]` before measuring the full Worker build can regress artifact size or runtime without a build-time benefit.
 
 Provenance: one owner-authorized GPT Pro submission, job `66ca9a42-20cf-4ff8-acd2-e01653d97ea3`, 2026-10-23.
+
+## DeepSeek waterfall fails over before a provider reset wait - 2026-10-24
+
+The `ubiquity/deepseek-flash` synthetic model gives its LithosAI hop the immediate-failover refusal policy. A 429 or 402 is returned to the waterfall at once, so the next configured provider is attempted without spending the vendor's reset window. Direct LithosAI model ids keep the existing buffered and streamed wait policies.
+
+Reason: live LithosAI headers reported a 600-request and 8,000,000-token/minute budget, while the gateway's parallel Codex agents sent large contexts that repeatedly emptied the token bucket. Three refusals also reported `402 insufficient_quota` and `the organization is out of credit`. A streamed hop could otherwise hold an open response for five waits and up to 300 seconds before the waterfall advanced, which surfaced as iOS steering timeouts. Immediate failover improves responsiveness and prevents a refused first hop from consuming the next provider's latency budget.
+
+Reversal risk: the waterfall reaches the Official DeepSeek, OpenRouter, Surplus and OpenLux hops sooner, which can change cost mix and exposes more provider churn. The order, paid pins, direct Lithos behavior and credentials are unchanged. If the provider recovers, it is eligible again on the next request.
