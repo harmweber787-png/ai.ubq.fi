@@ -288,6 +288,12 @@ test("shipped Claude rows never reuse another account or replacement cohort's ma
   assert.equal(rendered[1], null, "a poll racing credential replacement displays unknown metadata, never the replacement's provenance");
 });
 
+test("the restored Claude meter exposes an explicit refresh control", () => {
+  assert.match(sourceText, /dataset\.capacityRefresh/);
+  assert.match(sourceText, /Refresh usage/);
+  assert.match(sourceText, /\/admin\/providers\/claude-code\/quota\/refresh/);
+});
+
 test("shipped shared capacity list supports legacy singleton and distinct roster rows with stable disclosure state", () => {
   class CapacityRow extends TestElement {
     details = new TestElement();

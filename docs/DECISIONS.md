@@ -14,6 +14,22 @@ Reason: OpenRouter's default model list omits decision models, so the admin pick
 
 Reversal risk: returning to the default text-only discovery hides every decision model again. Advertising decision rows on Chat Completions or Responses, or accepting text rows on `/v1/decisions`, would produce guaranteed upstream failures and break the gateway's listed-equals-servable contract.
 
+## Admin Analytics restores the Claude subscription meter with an explicit refresh - 2026-10-25
+
+The admin Analytics view restores the Claude subscription capacity rows and chart series. Each Claude account row exposes a **Refresh usage** action, and the first stale row rendered in a page session triggers the same refresh once automatically. The action calls `POST /admin/providers/claude-code/quota/refresh`, which selects the account's Haiku model (or first discovered model), sends a one-token streaming Messages request, captures the unified quota headers, cancels the response body, and records the accepted observation through the existing quota writer. A refresh within the previous 60 seconds returns the current evidence without another provider call. Claude traffic routed through the gateway continues to update the meter automatically through the existing header-observation path.
+
+Reason: the owner rejected removing the meter and required a working source. The stored OAuth setup token cannot call Anthropic's separate usage endpoint because it lacks the `user:profile` scope. The unified rate-limit headers on a minimal Messages request are the authoritative independent source, and a manual action avoids background synthetic traffic. The same endpoint remains available to gateway traffic, so ordinary Claude use refreshes the meter without pressing the button.
+
+Reversal risk: removing the refresh action returns the meter to waiting-only updates. Continuous polling would consume subscription requests indefinitely and is deliberately not used; only one stale-load attempt and explicit operator refresh are permitted. A future profile-scoped usage source may replace the minimal probe without changing the meter's observation contract.
+
+## Admin console browser sign-in is Passport-only - 2026-10-25
+
+The admin console and chat present the Ubiquity-branded Passport sign-in button established in the Passport `sign-in-buttons` study: the Ubiquity mark plus the label "Sign in with Ubiquity". The admin page exposes only that browser sign-in; its former secondary "Sign in" gate, passkey controls, and admin-token controls are removed from the visible page. Hidden compatibility nodes preserve existing client code and local automation. Programmatic admin tokens and existing passkey relay routes remain available to command-line tooling and separately supported clients.
+
+Reason: the owner reported two login choices and requested Passport as the only login service.
+
+Reversal risk: re-exposing passkey or token fields restores the second visible login path. Removing the server-side token and passkey authorities would break automation and approved relay clients, so that broader change requires a separate decision.
+
 ## Bun serves the Passport browser sign-in advertised by its admin page - 2026-10-23
 
 The production Bun gateway implements the existing Passport `ai` registration at `/auth/login`, `/auth/callback`, and `/auth/logout`, matching the fixed issuer, audience, origin, callback, RS256/JWKS verification, host-only secure cookies, and cookie-only admin authority used by the Rust implementation. An administrator claim is required for admin access; agent tokens never become admin sessions, and foreign-origin cookie mutations are rejected. The admin button requests `/admin` as its return destination; that fixed choice is bound into the random login state, while ordinary chat login returns to `/chat`.
@@ -2494,3 +2510,11 @@ Reversal risk: removing the retry window or lowering it below the restart interv
 Reason: a live iOS steer reached a `1,032,954`-token estimate against the LithosAI `1,032,192`-token budget, only 762 tokens over, and could not be sent. The request carried a 961,798-byte adopted compaction summary plus 2,730,984 serialized bytes of history. Messages before that summary are redundant after Codex has adopted it; retaining them made a long thread unusable on DeepSeek while the same client could continue with GPT. The reduction preserves the adopted summary, the current steer, the complete tool schema, and all post-summary messages.
 
 Reversal risk: removing this reduction restores the hard steer failure for long adopted summaries. Dropping post-summary messages, rewriting the summary, applying this to `truncation: "disabled"`, or admitting a still-over-budget projection would lose current work or dispatch an oversized request. The version bump distinguishes this aggregate behavior from v1 in logs and tests.
+
+## Preserve steer history and classify Codex context errors - 2026-10-25
+
+`chat-prompt-admission/v3` supersedes the v2 pre-summary reduction above. An adopted summary does not prove that every earlier user message is redundant. Aggregate admission now measures the complete existing projection without removing pre-summary messages; an oversized projection returns HTTP 400 `context_length_exceeded` before dispatch for every truncation mode. The existing per-field projection rules, exact summary exemption, provider windows, and output reserves are unchanged.
+
+For the Codex subscription stream only, a generic terminal `error` with exact code `context_length_exceeded` and an already tracked response identifier becomes one client-visible `response.failed` carrying the original error, response identity, template, and observed output. Provider capture, lifecycle callbacks, settlement, and fallback continue to observe the original upstream error. Ordinary errors and other providers retain their existing frames.
+
+Reason: an isolated installed Codex 0.164.0 fixture ignored both flat and nested generic context errors and reported a retryable disconnect; the same code in `response.failed.response.error` produced the explicit context-window failure. This classification correction preserves the failure rather than shrinking context or claiming automatic recovery. It does not establish behavior of a different installed client version or physical iOS acceptance.
