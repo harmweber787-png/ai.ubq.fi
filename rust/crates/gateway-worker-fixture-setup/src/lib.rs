@@ -2,7 +2,6 @@
 //! HTTP protocol composition stays in gateway-worker-fixture.
 
 use gateway_auth::{
-    GatewayError,
     crypto::{Secret, base64url},
     native::NATIVE_PUBLICATION_PATH,
     native_auth::{NativeAuthHeaders, NativeAuthenticator, NativeTransportIdentity},
@@ -14,9 +13,10 @@ use gateway_auth::{
 use gateway_authority::{
     keys,
     paid_control::{PAID_CONTROL_CONFIG_VERSION, PaidControlConfig, PaidControlOwner},
-    routing::{PoolAccount, SubscriptionPool},
+    routing_types::{PoolAccount, SubscriptionPool},
 };
 use gateway_core::{
+    error::GatewayError,
     identity::PoolVersionstamp,
     provider::PaidProvider,
     state::{
@@ -365,14 +365,17 @@ mod tests {
         assert!(super::parse_codex_source_pool(&rejected).unwrap().is_none());
     }
     use gateway_auth::{
-        GatewayError,
         crypto::base64url,
         native_auth::{NativeAuthHeaders, NativeAuthenticator},
         native_replay::StoreNonceAuthority,
     };
     use gateway_authority::{keys, paid_control::PaidControlConfig};
-    use gateway_core::state::{
-        AtomicTransition, AuthorityStore, CommitOutcome, RecordKey, RecordMutation, StoredRecord,
+    use gateway_core::{
+        error::GatewayError,
+        state::{
+            AtomicTransition, AuthorityStore, CommitOutcome, RecordKey, RecordMutation,
+            StoredRecord,
+        },
     };
     use gateway_publication::{
         control_publication::{

@@ -1,17 +1,20 @@
 use crate::{
     classify,
-    journal::{self, AttemptRecord, BillingUsage, Journal, Phase},
+    journal::{self, AttemptRecord, BillingUsage, Journal, Phase, unavailable},
     session::RoutingSession,
     settlement,
-    types::*,
+    types::{
+        AttemptFailure, AttemptUsage, CredentialFence, FailureOrigin, PreparedAttempt,
+        RecoveredSession, RefreshOutcome, RefusalDecision, RevisionCheckWire, RoutingHost,
+        RoutingResult, TransportState,
+    },
 };
-use gateway_authority::{AuthorityClock, TokenSource, quota::KernelTerminal};
-use gateway_core::{
-    GatewayError,
-    lifecycle::{PaidTerminalState, SemanticTerminal, TransportObservation},
-    provider::UpstreamProvider,
-    query::QueryStore,
-};
+use gateway_authority::kernel::KernelTerminal;
+use gateway_authority::store::{AuthorityClock, TokenSource};
+use gateway_core::error::GatewayError;
+use gateway_core::lifecycle::{PaidTerminalState, SemanticTerminal, TransportObservation};
+use gateway_core::provider::UpstreamProvider;
+use gateway_core::query::QueryStore;
 use gateway_providers::policy::{HopDecision, HopFailure};
 
 impl<
@@ -49,85 +52,10 @@ impl<
         }
         let (row, record) = self.observed_attempt(attempt).await?;
         if record.phase != Phase::Prepared {
-            return Err(journal::unavailable(
-                "This attempt's dispatch intent is already consumed.",
-            )
-            .into());
+            return Err(unavailable("This attempt's dispatch intent is already consumed.").into());
         }
-        self.host
-            .ensure_credential_current(&record.fence, &self.input.principal, &record.model)
-            .await?;
-        if let CredentialFence::Codex { admission, .. } = &record.fence {
-            self.authority()
-                .ensure_admission_current(admission, self.now()?)
-                .await?;
-        }
-        if let Some(reservation) = &record.paid {
-            let synthetic = match self.plan.hops.get(record.cursor) {
-                Some(crate::policy::RouteHop::Paid {
-                    provider,
-                    model,
-                    synthetic,
-                }) if provider == &reservation.provider && model == &record.model => *synthetic,
-                _ => {
-                    return Err(journal::unavailable(
-                        "Paid dispatch no longer matches the original pinned hop.",
-                    )
-                    .into());
-                }
-            };
-            let input = gateway_authority::paid::PaidRequest {
-                key_id: reservation.key_id.clone(),
-                request_id: reservation.request_id.clone(),
-                attempt_id: reservation.attempt_id.clone(),
-                provider: reservation.provider,
-                model: record.model.clone(),
-                route: self.input.context.route.clone(),
-                path: if self.input.surface == gateway_providers::ClientSurface::Chat {
-                    "/v1/chat/completions"
-                } else {
-                    "/v1/responses"
-                }
-                .into(),
-                stream: self.input.streamed(),
-                reasoning: self.input.requested_reasoning(),
-                created_at_ms: self.input.context.started_at_ms,
-            };
-            let context = self.paid_context(reservation.provider, synthetic)?;
-            let receipt = self
-                .authority()
-                .authorize_paid_route(&input, &context, self.now()?)
-                .await?;
-            let receipt = self
-                .authority()
-                .bind_paid_original_dispatch(
-                    &receipt,
-                    &self.input.context,
-                    reservation,
-                    self.now()?,
-                )
-                .await?;
-            Self::check_paid_credential(&record.fence, &receipt)?;
-            let authorization = if synthetic {
-                gateway_authority::paid::PaidAuthorization::DirectPaidModel
-            } else {
-                self.paid_authorization(&row).await?
-            };
-            match self
-                .authority()
-                .reserve_paid(&input, &authorization, &receipt, self.now()?)
-                .await?
-            {
-                gateway_authority::paid::PaidAdmission::Existing(current)
-                    if current == *reservation => {}
-                _ => {
-                    return Err(journal::unavailable(
-                        "The paid reservation changed before dispatch.",
-                    )
-                    .into());
-                }
-            }
-        }
+        self.check_dispatch_credential(&record).await?;
+        self.check_paid_dispatch(&row, &record).await?;
         let mut api = row.api.clone();
         if let Some(reservation) = &api {
             api = Some(
@@ -166,9 +94,9 @@ impl<
                     .attempts
                     .iter_mut()
                     .find(|a| a.id == attempt.id)
-                    .ok_or_else(|| journal::unavailable("Attempt disappeared."))?;
+                    .ok_or_else(|| unavailable("Attempt disappeared."))?;
                 if current.phase != Phase::Prepared {
-                    return Err(journal::unavailable("Duplicate attempt dispatch."));
+                    return Err(unavailable("Duplicate attempt dispatch."));
                 }
                 current.phase = Phase::Intent;
                 j.api = api.clone();
@@ -176,6 +104,13 @@ impl<
             },
         )
         .await?;
+        self.check_dispatch_credential(&record).await?;
+        if self.host.cancelled() {
+            return Err(self.host.cancellation_error().into());
+        }
+        Ok(())
+    }
+    async fn check_dispatch_credential(&self, record: &AttemptRecord) -> RoutingResult<()> {
         self.host
             .ensure_credential_current(&record.fence, &self.input.principal, &record.model)
             .await?;
@@ -184,8 +119,75 @@ impl<
                 .ensure_admission_current(admission, self.now()?)
                 .await?;
         }
-        if self.host.cancelled() {
-            return Err(self.host.cancellation_error().into());
+        Ok(())
+    }
+    async fn check_paid_dispatch(
+        &self,
+        row: &Journal,
+        record: &AttemptRecord,
+    ) -> RoutingResult<()> {
+        if let Some(reservation) = &record.paid {
+            let synthetic = match self.plan.hops.get(record.cursor) {
+                Some(crate::policy::RouteHop::Paid {
+                    provider,
+                    model,
+                    synthetic,
+                }) if provider == &reservation.provider && model == &record.model => *synthetic,
+                _ => {
+                    return Err(unavailable(
+                        "Paid dispatch no longer matches the original pinned hop.",
+                    )
+                    .into());
+                }
+            };
+            let input = gateway_authority::paid_types::PaidRequest {
+                key_id: reservation.key_id.clone(),
+                request_id: reservation.request_id.clone(),
+                attempt_id: reservation.attempt_id.clone(),
+                provider: reservation.provider,
+                model: record.model.clone(),
+                route: self.input.context.route.clone(),
+                path: if self.input.surface == gateway_providers::types::ClientSurface::Chat {
+                    "/v1/chat/completions"
+                } else {
+                    "/v1/responses"
+                }
+                .into(),
+                stream: self.input.streamed(),
+                reasoning: self.input.requested_reasoning(),
+                created_at_ms: self.input.context.started_at_ms,
+            };
+            let context = self.paid_context(reservation.provider, synthetic)?;
+            let receipt = self
+                .authority()
+                .authorize_paid_route(&input, &context, self.now()?)
+                .await?;
+            let receipt = self
+                .authority()
+                .bind_paid_original_dispatch(
+                    &receipt,
+                    &self.input.context,
+                    reservation,
+                    self.now()?,
+                )
+                .await?;
+            Self::check_paid_credential(&record.fence, &receipt)?;
+            let authorization = if synthetic {
+                gateway_authority::paid_types::PaidAuthorization::DirectPaidModel
+            } else {
+                self.paid_authorization(row).await?
+            };
+            match self
+                .authority()
+                .reserve_paid(&input, &authorization, &receipt, self.now()?)
+                .await?
+            {
+                gateway_authority::paid_types::PaidAdmission::Existing(current)
+                    if current == *reservation => {}
+                _ => {
+                    return Err(unavailable("The paid reservation changed before dispatch.").into());
+                }
+            }
         }
         Ok(())
     }
@@ -546,7 +548,7 @@ fn paid_terminal(terminal: SemanticTerminal) -> PaidTerminalState {
         SemanticTerminal::Failed | SemanticTerminal::Error => PaidTerminalState::Failed,
     }
 }
-fn lithos_wait_ms(headers: &gateway_providers::Headers, now: i64) -> Option<i64> {
+fn lithos_wait_ms(headers: &gateway_providers::types::Headers, now: i64) -> Option<i64> {
     let wait = gateway_providers::lithos::rate_limit_wait(headers, now as f64, |raw| {
         chrono::DateTime::parse_from_rfc2822(raw)
             .ok()

@@ -1,10 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
-
-use gateway_core::GatewayError;
+use crate::transport::{SupervisorMethod, SupervisorTransport};
+use gateway_core::error::GatewayError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-
-use crate::transport::{SupervisorMethod, SupervisorTransport};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_SOURCES: usize = 8;
 pub const INVENTORY_LIMIT: usize = 60;
@@ -272,7 +270,7 @@ fn redacted_follow_entries(turn_id: &str, items: &Value) -> Vec<FollowEntry> {
         .into_iter()
         .map(|entry| (entry.index, entry.revision))
         .collect();
-    let sanitized = crate::redaction::sanitize_follow_items(items);
+    let sanitized = gateway_core::redaction::sanitize_follow_items(items);
     let mut entries = extract_follow(turn_id, &sanitized);
     for entry in &mut entries {
         if let Some(revision) = raw_revisions.get(&entry.index) {

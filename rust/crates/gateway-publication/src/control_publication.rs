@@ -12,7 +12,7 @@ use gateway_authority::{
     },
 };
 use gateway_core::{
-    GatewayError,
+    error::GatewayError,
     provider::PaidProvider,
     state::{AuthorityStore, RecordMutation, RevisionCheck, StoredRecord},
 };

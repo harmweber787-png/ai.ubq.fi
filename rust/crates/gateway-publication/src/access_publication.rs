@@ -13,10 +13,10 @@ use gateway_auth::{
 use gateway_authority::{
     keys,
     paid_control::PaidControlOwner,
-    routing::{PoolAccount, SubscriptionPool},
+    routing_types::{PoolAccount, SubscriptionPool},
 };
 use gateway_core::{
-    GatewayError,
+    error::GatewayError,
     identity::PoolVersionstamp,
     state::{AuthorityStore, RecordMutation, RevisionCheck},
 };

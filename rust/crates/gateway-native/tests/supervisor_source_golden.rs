@@ -1,7 +1,7 @@
+use gateway_core::redaction;
 use gateway_native::{
-    redaction, supervisor, supervisor_brief as brief, supervisor_data,
-    supervisor_inventory as inventory, supervisor_metadata as metadata,
-    supervisor_rollout as rollout,
+    supervisor, supervisor_brief as brief, supervisor_data, supervisor_inventory as inventory,
+    supervisor_metadata as metadata, supervisor_rollout as rollout,
 };
 use serde_json::{Value, json};
 fn corpus() -> Value {

@@ -26,16 +26,17 @@ struct Receipt {
     entries: usize,
     manifest_sha256: String,
     selected_capture_sha256: String,
-    manifest: gateway_migration::CoreStateManifest,
+    manifest: gateway_migration::core_state::CoreStateManifest,
     eof: bool,
     spool_directory: String,
     target_touched: bool,
     credential_opened: bool,
 }
-fn failure(message: &str) -> gateway_migration::MigrationError {
-    gateway_core::GatewayError::unavailable(message, "m20_core_state_manifest_invalid").into()
+fn failure(message: &str) -> gateway_migration::error::MigrationError {
+    gateway_core::error::GatewayError::unavailable(message, "m20_core_state_manifest_invalid")
+        .into()
 }
-fn main() -> Result<(), gateway_migration::MigrationError> {
+fn main() -> Result<(), gateway_migration::error::MigrationError> {
     assert_eq!(std::env::args_os().len(), 1, "Private input is stdin only");
     let mut raw = Vec::new();
     std::io::stdin()

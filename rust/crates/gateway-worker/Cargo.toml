@@ -20,8 +20,10 @@ gateway-authority.workspace = true
 gateway-schema.workspace = true
 gateway-providers.workspace = true
 gateway-admin.workspace = true
+gateway-admin-data.workspace = true
 gateway-admission.workspace = true
 gateway-catalog-runtime.workspace = true
+gateway-capacity-recovery.workspace = true
 gateway-claude-runtime.workspace = true
 gateway-admin-runtime.workspace = true
 gateway-routing-runtime.workspace = true
@@ -35,6 +37,10 @@ serde_json.workspace = true
 futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
 worker.workspace = true
 wasm-bindgen.workspace = true
+
+[dev-dependencies]
+gateway-observability-test-support.workspace = true
+gateway-routing-runtime-test-support.workspace = true
 
 [lints]
 workspace = true

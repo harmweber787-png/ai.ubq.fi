@@ -11,14 +11,16 @@ use crate::{
 };
 use futures_util::StreamExt;
 use gateway_authority::{
-    Authority,
     cache_experiment::{
-        CacheDispatch, ExperimentIo, PreparedTarget, ReadSample, RefreshPermit,
+        PreparedTarget, RefreshPermit,
         model::{failed, unavailable},
+        run::{ExperimentIo, ReadSample},
+        transport::CacheDispatch,
     },
     native_control::actor::{NativeActorScope, NativeRenewalActor},
+    store::Authority,
 };
-use gateway_core::{GatewayError, identity::PoolVersionstamp, source_json::SourceJson};
+use gateway_core::{error::GatewayError, identity::PoolVersionstamp, source_json::SourceJson};
 use gateway_observability::{
     ObservabilityRuntime,
     types::{HealthEvent, HealthTarget, ObservabilityHost},
@@ -327,7 +329,7 @@ impl ExperimentIo for Host<'_> {
         }
         if head.slot != slot {
             return Ok(ReadSample {
-                value: Err(gateway_authority::cache_experiment::Reason::SlotDrift),
+                value: Err(gateway_authority::cache_experiment::model::Reason::SlotDrift),
                 completed: false,
             });
         }
