@@ -105,7 +105,13 @@ export const isTestPath = (path: string): boolean => TEST_FILE.test(path);
 /** Rust has its own compiler/test graph; never feed it to the Bun import scanner. */
 export const isRustPath = (path: string): boolean => path.startsWith("rust/") && !isDocumentationPath(path);
 export const isRustGatePath = (path: string): boolean => isRustPath(path) || /^scripts\/rust-verify(?:\.test)?\.ts$/.test(path);
-export const RUST_NATIVE_ONLY_PACKAGES = ["gateway-native"] as const;
+export const RUST_NATIVE_ONLY_PACKAGES = [
+  "gateway-native",
+  "gateway-quality",
+  "gateway-quality-syntax",
+  "gateway-claude-runtime-test-support",
+  "gateway-migration-test-support",
+] as const;
 const WORKFLOW_CONTRACT_PATH = ".github/workflows/deno-deploy.yml";
 
 export const classifyChangedPaths = (paths: readonly string[]): ChangeScope => {

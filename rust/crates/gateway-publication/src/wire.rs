@@ -2,11 +2,9 @@ use crate::{
     access_publication::PreparedAccessPublication,
     control_publication::PreparedConfigurationPublication,
 };
-use gateway_auth::{
-    GatewayError,
-    native_credentials::{NativeCredentials, parse_native_document},
-};
+use gateway_auth::native_credentials::{NativeCredentials, parse_native_document};
 use gateway_authority::paid_control::{PAID_CONTROL_CONFIG_VERSION, PaidControlConfig};
+use gateway_core::error::GatewayError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 

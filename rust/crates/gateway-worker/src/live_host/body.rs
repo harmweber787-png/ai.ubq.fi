@@ -1,24 +1,22 @@
 //! Streaming call answers and bounded replacement errors. No extra SDP-answer limit is invented.
-use std::{collections::BTreeMap, rc::Rc, task::Poll};
-
-use futures_util::StreamExt;
-use gateway_auth::provider_credentials::CodexSourceAccount;
-use gateway_core::GatewayError;
-use gateway_live_runtime::types::{
-    LIVE_CALL_CAPTURE_TIMEOUT_MS, LIVE_CALL_CAPTURED_ERROR_MAX_BYTES, LIVE_CALL_HEADERS_TIMEOUT_MS,
-    LIVE_CALLS_PATH, LiveCreateRequest, LiveDispatchAttempt, LiveDispatchFailure, LiveResponse,
-};
-use worker::js_sys::Uint8Array;
-use worker::wasm_bindgen::JsCast;
-use worker::wasm_bindgen_futures::JsFuture;
-use worker::{Context, Headers, Response, ResponseBody};
-
 use crate::{
     host::{PlatformHost, setting},
     transport::{
         outbound::{Cancellation, PinnedDestination},
         stream::{ObservationHandle, ObservedStream},
     },
+};
+use futures_util::StreamExt;
+use gateway_auth::provider_credentials::CodexSourceAccount;
+use gateway_core::error::GatewayError;
+use gateway_live_runtime::types::{
+    LIVE_CALL_CAPTURE_TIMEOUT_MS, LIVE_CALL_CAPTURED_ERROR_MAX_BYTES, LIVE_CALL_HEADERS_TIMEOUT_MS,
+    LIVE_CALLS_PATH, LiveCreateRequest, LiveDispatchAttempt, LiveDispatchFailure, LiveResponse,
+};
+use std::{collections::BTreeMap, rc::Rc, task::Poll};
+use worker::{
+    Context, Headers, Response, ResponseBody, js_sys::Uint8Array, wasm_bindgen::JsCast,
+    wasm_bindgen_futures::JsFuture,
 };
 
 pub enum Body {
@@ -183,7 +181,7 @@ pub(super) async fn capture(
 pub fn into_response(
     response: LiveResponse<Body>,
     context: Rc<Context>,
-) -> Result<crate::GatewayResponse, GatewayError> {
+) -> Result<crate::response::GatewayResponse, GatewayError> {
     let headers = Headers::new();
     for (name, value) in response.headers {
         headers.set(&name, &value).map_err(|_| unreachable())?;
@@ -223,5 +221,5 @@ pub fn into_response(
         &init,
     )
     .map_err(|_| unreachable())?;
-    Ok(crate::GatewayResponse::Raw(raw))
+    Ok(crate::response::GatewayResponse::Raw(raw))
 }

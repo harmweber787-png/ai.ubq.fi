@@ -1,9 +1,7 @@
 //! Constructor-bound publication HTTP only; no proxy environment, redirects,
 //! alternate URL, refresh material or unauthenticated receipt acceptance.
-use gateway_auth::{
-    GatewayError,
-    native::{NATIVE_MAX_BODY_BYTES, NATIVE_PUBLICATION_PATH},
-};
+use gateway_auth::native::{NATIVE_MAX_BODY_BYTES, NATIVE_PUBLICATION_PATH};
+use gateway_core::error::GatewayError;
 use gateway_publication::transport::{PublicationCarrier, PublicationRequest, PublicationResponse};
 use std::time::Duration;
 

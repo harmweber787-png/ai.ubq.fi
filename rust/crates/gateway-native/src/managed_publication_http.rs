@@ -6,7 +6,6 @@ use crate::{
     private_https::PrivateHttps,
 };
 use gateway_auth::{
-    GatewayError,
     crypto::base64url,
     managed_access::ManagedAccessProjection,
     native::{NATIVE_MAX_BODY_BYTES, NATIVE_PUBLICATION_PATH},
@@ -15,6 +14,7 @@ use gateway_auth::{
     native_credentials::NativeGeneration,
 };
 use gateway_authority::native_control::NativeRenewalFence;
+use gateway_core::error::GatewayError;
 use gateway_publication::{
     managed::ExpectedManagedAccessPublication,
     transport::{

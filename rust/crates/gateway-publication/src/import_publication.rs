@@ -4,20 +4,17 @@ use crate::transport::{
     PublicationReceiver, PublicationRequest, PublicationResponse, error_response,
 };
 use gateway_auth::{
-    GatewayError,
     native::{NATIVE_PUBLICATION_PATH, NATIVE_RESPONSE_MAC_HEADER},
-};
-use gateway_authority::{
-    TokenSource,
-    native_control::{
-        NativeRenewalAuthority, NativeRenewalCancellation,
-        import::{
-            ImportPublicationCommandData, NativeImportPublication,
-            NativeImportPublicationDisposition, import_publication_max_bytes,
-        },
+    native_import::publication::{
+        NativeImportPublication, NativeImportPublicationDisposition,
+        command::{ImportPublicationCommandData, import_publication_max_bytes},
     },
 };
-use gateway_core::state::AuthorityStore;
+use gateway_authority::{
+    native_control::{NativeRenewalCancellation, receiver::NativeRenewalAuthority},
+    store::TokenSource,
+};
+use gateway_core::{error::GatewayError, state::AuthorityStore};
 
 impl PublicationReceiver {
     /// Dedicated finite entry, deliberately not selected by an old operation's

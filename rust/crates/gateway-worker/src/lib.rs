@@ -1,5 +1,9 @@
-use gateway_core::GatewayError;
-use gateway_core::health::{DEPLOYMENT_ID_HEADER, GIT_SHA_HEADER, ReleaseIdentity};
+use gateway_core::{
+    error::GatewayError,
+    health::{DEPLOYMENT_ID_HEADER, GIT_SHA_HEADER, ReleaseIdentity},
+};
+use native_host::NativeBindings;
+use response::GatewayResponse;
 use std::rc::Rc;
 #[cfg(feature = "entrypoint")]
 use worker::event;
@@ -17,7 +21,6 @@ mod catalog;
 mod catalog_host;
 mod claude_host;
 mod codex_admin_host;
-mod codex_capacity_recovery;
 mod compaction_host;
 mod cors;
 mod extras;
@@ -38,23 +41,18 @@ mod live_http;
 pub mod migration_host;
 mod multipart;
 mod native_authority;
-mod native_host;
+pub mod native_host;
 mod native_transport;
 mod observability_host;
 mod paid_lookup;
-mod private_installer;
+pub mod private_installer;
 mod publication;
-mod response;
+pub mod response;
 mod routing_host;
 mod runtime;
 mod source_collator;
 pub mod storage;
 pub mod transport;
-
-pub use authority::GatewayAuthority;
-pub use native_host::NativeBindings;
-pub use private_installer::RustInitialControlInstaller;
-pub use response::GatewayResponse;
 
 fn error_response(error: GatewayError) -> Result<Response> {
     let mut response = Response::from_json(&error.envelope)?.with_status(error.status);

@@ -6,18 +6,19 @@ use crate::{
     transport::outbound::{PinnedDestination, send_http},
 };
 use gateway_auth::{
-    AuthConfig, AuthResponse,
     provider_credentials::{CodexSourceAccount, read_codex_source_pool},
+    types::{AuthConfig, AuthResponse},
 };
 use gateway_authority::{
-    Authority,
+    capacity_rules::parse_capacity_observation,
     manual_reset::{ManualResetPreparation, ManualResetTarget},
     native_control::actor::NativeRenewalActor,
-    reset::{ResetClaim, ResetState},
-    routing::{CapacityObservation, parse_capacity_observation},
+    reset_types::{ResetClaim, ResetState},
+    routing_types::CapacityObservation,
+    store::Authority,
 };
 use gateway_core::{
-    GatewayError, js_string::JsString16, source_json::SourceJson, state::AuthorityStore,
+    error::GatewayError, js_string::JsString16, source_json::SourceJson, state::AuthorityStore,
 };
 use serde_json::{Value, json};
 use std::{cell::RefCell, collections::BTreeMap};

@@ -1,11 +1,11 @@
-use gateway_auth::{AuthHost, AuthMethod, AuthPrincipal, crypto::uuid_from_random, store};
-use gateway_core::{
-    GatewayError,
-    js_string::JsString16,
-    source_json::SourceJson,
-    state::{RecordKey, RecordMutation, StoredRecord},
-    value::PortableValue,
-};
+use gateway_auth::crypto::uuid_from_random;
+use gateway_auth::store;
+use gateway_auth::types::{AuthHost, AuthMethod, AuthPrincipal};
+use gateway_core::error::GatewayError;
+use gateway_core::js_string::JsString16;
+use gateway_core::source_json::SourceJson;
+use gateway_core::state::{RecordKey, RecordMutation, StoredRecord};
+use gateway_core::value::PortableValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
