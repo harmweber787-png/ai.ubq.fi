@@ -741,6 +741,7 @@ const deliverBufferedResponses = async (delivery: ResponsesDeliveryState): Promi
 
 const deliverStreamingResponses = (delivery: ResponsesDeliveryState): Response => {
   const body = createOwnedResponsesStream({
+    codexContextErrorCompatibility: delivery.ready.provider === "chatgpt_codex",
     initial: delivery.ready.prepared.buffered,
     iterator: delivery.ready.prepared.iterator,
     responseId: delivery.ready.responseId,

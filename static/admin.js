@@ -166,7 +166,6 @@ const loadingTitle = mustGet("admin-loading-title");
 const loadingSummary = mustGet("admin-loading-summary");
 const loadingGrid = mustGet("admin-loading-grid");
 const authGate = mustGet("admin-auth-gate");
-const authGateOpen = mustGet("admin-auth-gate-open");
 const loadingAuthStatus = mustGet("loading-auth-status");
 const loadingKeysStatus = mustGet("loading-keys-status");
 const loadingUsersStatus = mustGet("loading-users-status");
@@ -477,7 +476,8 @@ const updateLoadingAuthStatus = () => {
 
 const syncLoadingGate = () => {
   const preparing = adminAccessState.isAdmin || (!adminAccessState.checked && hasAdminCredential());
-  authGate.hidden = preparing;
+  const authWidgetExpanded = document.body.dataset.authWidget === "expanded";
+  authGate.hidden = preparing || authWidgetExpanded;
   loadingGrid.hidden = !preparing;
   loadingTitle.textContent = preparing ? "Preparing admin console" : "Sign in to manage the gateway";
 };
@@ -501,6 +501,7 @@ const setAuthWidgetOpen = (open, options = {}) => {
   authWidgetToggle.setAttribute("aria-label", expanded ? "Collapse authentication" : "Open authentication");
   authWidgetToggle.dataset.tooltip = expanded ? "Collapse authentication" : "Open authentication";
   authWidgetToggleLabel.textContent = expanded ? "Close" : "Session";
+  syncLoadingGate();
   if (expanded && options.focus) {
     globalThis.requestAnimationFrame(() => authWidgetPanel.focus({ preventScroll: true }));
   }
@@ -1522,12 +1523,48 @@ const claudeCapacityCredentialLabel = (source) => {
   return "Not configured";
 };
 
+const claudeUsageAutoRefreshAttempted = new Set();
+
 const claudeCapacityWindowForDisplay = (window) => {
   if (!window) return null;
   return {
     used_percent: window.used_percent,
     reset_at_ms: window.reset_at_ms,
   };
+};
+
+/** Explicitly refresh one account's headers with a minimal streaming probe, then reload the meter. */
+const refreshClaudeUsage = async (source, button, options = {}) => {
+  if (!adminAccessState.isAdmin || !hasAdminCredential() || typeof source.account_id !== "string") return;
+  const target = apiUrl("/admin/providers/claude-code/quota/refresh");
+  const token = getAdminToken();
+  button.disabled = true;
+  button.textContent = "Refreshing...";
+  try {
+    const response = await fetch(target, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      cache: "no-store",
+      body: JSON.stringify({ account_id: source.account_id, account_cohort_id: source.account_cohort_id }),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(payload?.error?.message || "Claude usage refresh failed");
+    if (options.automatic !== true) {
+      toast.success(payload?.refreshed === false ? "Claude usage is current" : "Claude usage refreshed", {
+        description:
+          payload?.refreshed === false
+            ? "The last observation is less than a minute old."
+            : `Observed ${formatCapacityTimestamp(payload?.observed_at_ms)}.`,
+      });
+    }
+    await loadProviderCapacity();
+    void loadClaudeSubscription();
+  } catch (error) {
+    if (options.automatic !== true) toast.error("Claude usage refresh failed", { description: error.message });
+  } finally {
+    button.disabled = false;
+    button.textContent = "Refresh usage";
+  }
 };
 
 /**
@@ -1565,8 +1602,23 @@ const renderClaudeCapacitySource = (source) => {
   const badge = document.createElement("span");
   badge.dataset.badge = "";
   setBadge(badge, capacityBadgeState(source.state), capacityStateLabel(source.state));
-  header.append(title, badge);
+  const refresh = document.createElement("button");
+  refresh.type = "button";
+  refresh.dataset.capacityRefresh = "";
+  refresh.textContent = "Refresh usage";
+  refresh.title = "Uses one minimal streaming Claude request to read the current quota headers.";
+  refresh.disabled = !source.account_id;
+  refresh.addEventListener("click", () => void refreshClaudeUsage(source, refresh));
+  header.append(title, badge, refresh);
   row.append(header);
+  if (
+    source.state === "stale" &&
+    typeof source.account_id === "string" &&
+    !claudeUsageAutoRefreshAttempted.has(source.account_id)
+  ) {
+    claudeUsageAutoRefreshAttempted.add(source.account_id);
+    globalThis.setTimeout(() => void refreshClaudeUsage(source, refresh, { automatic: true }), 0);
+  }
 
   const windows = document.createElement("div");
   windows.dataset.capacityWindows = "";
@@ -4128,11 +4180,11 @@ const refreshAccessOverview = async () => {
   updateAccessPubkeysSummary();
 };
 
-const getKernelListMissingTokenMessage = () => "Paste an admin token to load GitHub access analytics and rate limits.";
+const getKernelListMissingTokenMessage = () => "Sign in with Passport to load GitHub access analytics and rate limits.";
 
 const getKernelListTargetChangedMessage = () => "Target changed. Loading GitHub access analytics and rate limits...";
 
-const getKernelQueueMissingTokenMessage = () => "Paste an admin token to load the rate limit queue.";
+const getKernelQueueMissingTokenMessage = () => "Sign in with Passport to load the rate limit queue.";
 
 const getKernelQueueTargetChangedMessage = () => "Target changed. Loading the rate limit queue...";
 
@@ -5684,7 +5736,7 @@ const refreshKernelPubKeys = async () => {
   const token = getAdminToken();
   if (!token && !hasAdminCredential()) {
     setKernelPubKeysBadge("bad", "Missing token");
-    setKernelPubKeysMessage("Paste an admin token to load kernel attestation keys.");
+    setKernelPubKeysMessage("Sign in with Passport to load kernel attestation keys.");
     updateAccessPubkeysSummary();
     return;
   }
@@ -5734,7 +5786,7 @@ const ensureKernelPubKeysLoaded = async () => {
   const token = getAdminToken();
   if (!token && !hasAdminCredential()) {
     setKernelPubKeysBadge("bad", "Missing token");
-    setKernelPubKeysMessage("Paste an admin token to load kernel attestation keys.");
+    setKernelPubKeysMessage("Sign in with Passport to load kernel attestation keys.");
     updateAccessPubkeysSummary();
     return;
   }
@@ -7610,7 +7662,7 @@ const refreshPasskeyUsers = async () => {
   const token = getAdminToken();
   if (!token && !hasAdminCredential()) {
     setPasskeyUsersBadge("bad", "Missing token");
-    setPasskeyUsersMessage("Paste a fallback admin token to manage passkey users.");
+    setPasskeyUsersMessage("Sign in with Passport to manage passkey users.");
     return;
   }
 
@@ -7632,7 +7684,7 @@ const refreshPasskeyUsers = async () => {
       setPasskeyUsersBadge("bad", data?.error?.message ?? "Error");
       setPasskeyUsersMessage(
         res.status === 403
-          ? "Admin token required. Paste a Deno/admin token in the fallback token field."
+          ? "Administrator access required. Sign in with Passport again."
           : "Failed to load passkey users."
       );
       return;
@@ -8276,7 +8328,7 @@ const switchKeysView = (view) => {
   if (allKeys.length) {
     renderKeys(allKeys, view);
   } else {
-    setKeyListMessage("Paste an admin token to load API keys.");
+    setKeyListMessage("Sign in with Passport to load API keys.");
     setKeysBadge("unknown", "Not loaded");
   }
 };
@@ -8492,7 +8544,7 @@ const refreshKeys = async () => {
   const token = getAdminToken();
   if (!token && !hasAdminCredential()) {
     setKeysBadge("bad", "Missing token");
-    setKeyListMessage("Paste an admin token to load API keys.");
+    setKeyListMessage("Sign in with Passport to load API keys.");
     updateAccessApiKeysSummary();
     return;
   }
@@ -8546,7 +8598,7 @@ const ensureKeysLoaded = async () => {
   const token = getAdminToken();
   if (!token && !hasAdminCredential()) {
     setKeysBadge("bad", "Missing token");
-    setKeyListMessage("Paste an admin token to load API keys.");
+    setKeyListMessage("Sign in with Passport to load API keys.");
     return;
   }
   if (keysLoadedAt && Date.now() - keysLoadedAt < 10_000) {
@@ -10914,11 +10966,11 @@ setKernelNewBadge("unknown", "Idle");
 setKernelQueueBadge("unknown", "Not loaded");
 setKernelPubKeysBadge("unknown", "Not loaded");
 setKernelPubKeyCreateBadge("unknown", "Idle");
-setKeyListMessage("Paste an admin token to load API keys.");
-setPasskeyUsersMessage("Paste a fallback admin token to manage passkey users.");
+setKeyListMessage("Sign in with Passport to load API keys.");
+setPasskeyUsersMessage("Sign in with Passport to manage passkey users.");
 setKernelListMessage(getKernelListMissingTokenMessage());
 setKernelQueueMessage(getKernelQueueMissingTokenMessage());
-setKernelPubKeysMessage("Paste an admin token to load kernel attestation keys.");
+setKernelPubKeysMessage("Sign in with Passport to load kernel attestation keys.");
 kernelFilterInput.value = "";
 kernelShowSelect.value = "all";
 switchKeysView("active");
@@ -10953,10 +11005,6 @@ bindForegroundRefresh(() => {
 
 authWidgetToggle.addEventListener("click", () => {
   setAuthWidgetOpen(authWidgetPanel.hidden, { focus: authWidgetPanel.hidden });
-});
-
-authGateOpen.addEventListener("click", () => {
-  setAuthWidgetOpen(true, { focus: true });
 });
 
 authWidgetClose.addEventListener("click", () => {
@@ -11001,15 +11049,15 @@ tokenInput.addEventListener("input", () => {
     setAdminAccessState({ checked: true, isAdmin: false, isSuperAdmin: false });
     setSignedInState(false);
     setKeysBadge("unknown", "Not loaded");
-    setKeyListMessage("Paste an admin token to load API keys.");
+    setKeyListMessage("Sign in with Passport to load API keys.");
     setPasskeyUsersBadge("unknown", "Not loaded");
-    setPasskeyUsersMessage("Paste a fallback admin token to manage passkey users.");
+    setPasskeyUsersMessage("Sign in with Passport to manage passkey users.");
     setKernelListBadge("unknown", "Not loaded");
     setKernelListMessage(getKernelListMissingTokenMessage());
     setKernelQueueBadge("unknown", "Not loaded");
     setKernelQueueMessage(getKernelQueueMissingTokenMessage());
     setKernelPubKeysBadge("unknown", "Not loaded");
-    setKernelPubKeysMessage("Paste an admin token to load kernel attestation keys.");
+    setKernelPubKeysMessage("Sign in with Passport to load kernel attestation keys.");
     allKeys = [];
     scheduleKeyExpiryRefresh();
     passkeyUsers = [];

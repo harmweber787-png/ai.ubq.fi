@@ -314,7 +314,7 @@ export default tsEslint.config(
     // save-pending cases (#669), which run the shipped whitelist save handler
     // and checkbox listener the same way, pass; code-eval alone flags their
     // VM call. Keep the exception to these named tests.
-    files: ["tests/admin-capacity-status.test.ts", "tests/admin-models-save-pending.test.ts"],
+    files: ["tests/admin-auth-ui.test.ts", "tests/admin-capacity-status.test.ts", "tests/admin-models-save-pending.test.ts"],
     rules: { "sonarjs/code-eval": "off" },
   },
   {

@@ -6,6 +6,7 @@ import {
   handleAdminClaudeCodeAuthGet,
   handleAdminClaudeCodeAuthSet,
   handleAdminClaudeCodeQuotaClear,
+  handleAdminClaudeCodeQuotaRefresh,
   handleAdminClaudeCodeAccess,
   handleAdminClaudeCodeAccountActive,
 } from "../src/admin/claude-code.ts";
@@ -21,6 +22,7 @@ import { CLAUDE_CODE_CONFIG_COOLDOWN_MS, loadClaudeCodeQuotaState, recordClaudeC
 import { resetProviderHealthThrottleForTest } from "../src/provider/health.ts";
 import { resetProviderSelectionCacheForTest } from "../src/provider/selection.ts";
 import { CLAUDE_CODE_ACCOUNTS_KEY, loadClaudeCodeAccountStore, resolveClaudeCodeAccount } from "../src/provider/claude-code-accounts.ts";
+import { resetClaudeCodeModelsCacheForTest } from "../src/provider/claude-code-models.ts";
 import { loadClaudeCodeAccessPolicy } from "../src/provider/claude-code-access.ts";
 
 const keyOf = (key: KvKey): string => JSON.stringify(key);
@@ -218,6 +220,81 @@ test("clearing account guards preserves observations and account removal remains
   });
 });
 
+test("the Claude meter refresh captures real quota headers with one minimal streaming probe", async () => {
+  await withAdminKv(async (kv) => {
+    resetClaudeCodeModelsCacheForTest();
+    const now = Date.now();
+    const modelPage = Response.json({
+      data: [{ id: "claude-haiku-5-5", type: "model", display_name: "Claude Haiku", created_at: "2026-10-01T00:00:00Z" }],
+      has_more: false,
+    });
+    await withStubbedAnthropic(
+      (call) => (call.url.endsWith("/v1/models") ? modelPage.clone() : Response.json({ error: "unexpected" }, { status: 500 })),
+      async () => {
+        const stored = await handleAdminClaudeCodeAuthSet(jsonRequest({ credential: "sk-ant-oat-fixture-meter-refresh" }));
+        assert.equal(stored.status, 200);
+      }
+    );
+    const account = await resolveClaudeCodeAccount(kv as unknown as Kv);
+    assert(account);
+    const calls: StubCall[] = [];
+    const probe = (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      const requestInit = init ?? {};
+      if (new URL(url).pathname.endsWith("/v1/models")) return Promise.resolve(modelPage.clone());
+      calls.push({ url, method: requestInit.method ?? "GET", headers: new Headers(requestInit.headers) });
+      assert.equal(url, "https://api.anthropic.com/v1/messages");
+      assert.equal(requestInit.method, "POST");
+      if (typeof requestInit.body !== "string") throw new Error("Expected a JSON request body");
+      const requestBody = JSON.parse(requestInit.body) as Record<string, unknown>;
+      assert.equal(requestBody.max_tokens, 1);
+      assert.equal(requestBody.stream, true);
+      assert.equal(requestBody.model, "claude-haiku-5-5");
+      return Promise.resolve(
+        new Response("event: message_stop\ndata: {}\n\n", {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+            "anthropic-ratelimit-unified-5h-status": "allowed",
+            "anthropic-ratelimit-unified-5h-utilization": "0.42",
+            "anthropic-ratelimit-unified-5h-reset": String(Math.floor((now + 18_000_000) / 1_000)),
+            "anthropic-ratelimit-unified-7d-status": "allowed",
+            "anthropic-ratelimit-unified-7d-utilization": "0.12",
+            "anthropic-ratelimit-unified-7d-reset": String(Math.floor((now + 86_400_000) / 1_000)),
+          },
+        })
+      );
+    };
+    const request = new Request("https://ai.ubq.fi/admin/providers/claude-code/quota/refresh", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ account_id: account.account_id, account_cohort_id: account.account_cohort_id }),
+    });
+    const response = await handleAdminClaudeCodeQuotaRefresh(request, { fetcher: probe, now: () => now });
+    assert.equal(response.status, 200, await response.clone().text());
+    const payload = await response.json();
+    assert.equal(payload.refreshed, true);
+    assert.equal(payload.model, "claude-haiku-5-5");
+    assert.equal(calls.length, 1);
+    const quota = await loadClaudeCodeQuotaState(kv as unknown as Kv, account);
+    assert(quota);
+    assert.equal(quota.windows["5h"]?.utilization, 0.42);
+    assert.equal(quota.windows["7d"]?.utilization, 0.12);
+
+    const duplicate = await handleAdminClaudeCodeQuotaRefresh(
+      new Request("https://ai.ubq.fi/admin/providers/claude-code/quota/refresh", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ account_id: account.account_id, account_cohort_id: account.account_cohort_id }),
+      }),
+      { fetcher: probe, now: () => now + 1_000 }
+    );
+    assert.equal(duplicate.status, 200);
+    assert.equal((await duplicate.json()).refreshed, false);
+    assert.equal(calls.length, 1, "a fresh observation avoids another provider request");
+  });
+});
+
 test("the admin routes stay behind admin auth and expose the documented paths", async () => {
   const { default: handler } = await import("../src/handler/index.ts");
   const paths: [string, string][] = [
@@ -225,6 +302,7 @@ test("the admin routes stay behind admin auth and expose the documented paths", 
     ["POST", "/admin/providers/claude-code/auth"],
     ["DELETE", "/admin/providers/claude-code/auth"],
     ["POST", "/admin/providers/claude-code/quota/clear"],
+    ["POST", "/admin/providers/claude-code/quota/refresh"],
     ["GET", "/admin/providers/claude-code/access"],
     ["POST", "/admin/providers/claude-code/access"],
     ["POST", "/admin/providers/claude-code/accounts/active"],
