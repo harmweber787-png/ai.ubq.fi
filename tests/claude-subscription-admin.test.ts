@@ -38,6 +38,10 @@ class AdminKv {
         writes.push(() => this.values.set(keyOf(key), value));
         return operation;
       },
+      delete: (key: KvKey) => {
+        writes.push(() => this.values.delete(keyOf(key)));
+        return operation;
+      },
       commit: () => {
         for (const write of writes) {
           write();
@@ -220,48 +224,30 @@ test("clearing account guards preserves observations and account removal remains
   });
 });
 
-test("the Claude meter refresh captures real quota headers with one minimal streaming probe", async () => {
+test("the Claude meter refresh reads direct OAuth usage and updates the existing quota state", async () => {
   await withAdminKv(async (kv) => {
     resetClaudeCodeModelsCacheForTest();
     const now = Date.now();
-    const modelPage = Response.json({
-      data: [{ id: "claude-haiku-5-5", type: "model", display_name: "Claude Haiku", created_at: "2026-10-01T00:00:00Z" }],
-      has_more: false,
+    await withStubbedAnthropic(modelsOk, async () => {
+      const stored = await handleAdminClaudeCodeAuthSet(jsonRequest({ credential: "sk-ant-oat-fixture-meter-refresh" }));
+      assert.equal(stored.status, 200);
     });
-    await withStubbedAnthropic(
-      (call) => (call.url.endsWith("/v1/models") ? modelPage.clone() : Response.json({ error: "unexpected" }, { status: 500 })),
-      async () => {
-        const stored = await handleAdminClaudeCodeAuthSet(jsonRequest({ credential: "sk-ant-oat-fixture-meter-refresh" }));
-        assert.equal(stored.status, 200);
-      }
-    );
     const account = await resolveClaudeCodeAccount(kv as unknown as Kv);
     assert(account);
     const calls: StubCall[] = [];
-    const probe = (input: RequestInfo | URL, init?: RequestInit) => {
+    const usageRead = (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
       const requestInit = init ?? {};
-      if (new URL(url).pathname.endsWith("/v1/models")) return Promise.resolve(modelPage.clone());
       calls.push({ url, method: requestInit.method ?? "GET", headers: new Headers(requestInit.headers) });
-      assert.equal(url, "https://api.anthropic.com/v1/messages");
-      assert.equal(requestInit.method, "POST");
-      if (typeof requestInit.body !== "string") throw new Error("Expected a JSON request body");
-      const requestBody = JSON.parse(requestInit.body) as Record<string, unknown>;
-      assert.equal(requestBody.max_tokens, 1);
-      assert.equal(requestBody.stream, true);
-      assert.equal(requestBody.model, "claude-haiku-5-5");
+      assert.equal(url, "https://api.anthropic.com/api/oauth/usage");
+      assert.equal(requestInit.method, "GET");
+      assert.equal(requestInit.body, undefined, "usage refresh never sends an inference body");
+      assert.equal(new Headers(requestInit.headers).get("authorization"), "Bearer sk-ant-oat-fixture-meter-refresh");
+      assert.doesNotMatch(url, /\/v1\/messages/);
       return Promise.resolve(
-        new Response("event: message_stop\ndata: {}\n\n", {
-          status: 200,
-          headers: {
-            "content-type": "text/event-stream",
-            "anthropic-ratelimit-unified-5h-status": "allowed",
-            "anthropic-ratelimit-unified-5h-utilization": "0.42",
-            "anthropic-ratelimit-unified-5h-reset": String(Math.floor((now + 18_000_000) / 1_000)),
-            "anthropic-ratelimit-unified-7d-status": "allowed",
-            "anthropic-ratelimit-unified-7d-utilization": "0.12",
-            "anthropic-ratelimit-unified-7d-reset": String(Math.floor((now + 86_400_000) / 1_000)),
-          },
+        Response.json({
+          five_hour: { utilization: 42, resets_at: new Date(now + 18_000_000).toISOString() },
+          seven_day: { utilization: 12, resets_at: new Date(now + 86_400_000).toISOString() },
         })
       );
     };
@@ -270,16 +256,21 @@ test("the Claude meter refresh captures real quota headers with one minimal stre
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ account_id: account.account_id, account_cohort_id: account.account_cohort_id }),
     });
-    const response = await handleAdminClaudeCodeQuotaRefresh(request, { fetcher: probe, now: () => now });
+    const response = await handleAdminClaudeCodeQuotaRefresh(request, { fetcher: usageRead, now: () => now });
     assert.equal(response.status, 200, await response.clone().text());
     const payload = await response.json();
     assert.equal(payload.refreshed, true);
-    assert.equal(payload.model, "claude-haiku-5-5");
+    assert.equal(payload.source, "oauth_usage");
+    assert.equal(payload.usage.state, "ok");
     assert.equal(calls.length, 1);
     const quota = await loadClaudeCodeQuotaState(kv as unknown as Kv, account);
     assert(quota);
     assert.equal(quota.windows["5h"]?.utilization, 0.42);
     assert.equal(quota.windows["7d"]?.utilization, 0.12);
+    const quotaUsage = quota.usage;
+    assert(quotaUsage);
+    assert.equal(quotaUsage.state, "ok");
+    assert.equal(quotaUsage.source, "oauth_usage");
 
     const duplicate = await handleAdminClaudeCodeQuotaRefresh(
       new Request("https://ai.ubq.fi/admin/providers/claude-code/quota/refresh", {
@@ -287,11 +278,55 @@ test("the Claude meter refresh captures real quota headers with one minimal stre
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ account_id: account.account_id, account_cohort_id: account.account_cohort_id }),
       }),
-      { fetcher: probe, now: () => now + 1_000 }
+      { fetcher: usageRead, now: () => now + 1_000 }
     );
     assert.equal(duplicate.status, 200);
-    assert.equal((await duplicate.json()).refreshed, false);
-    assert.equal(calls.length, 1, "a fresh observation avoids another provider request");
+    const duplicatePayload = await duplicate.json();
+    assert.equal(duplicatePayload.refreshed, false);
+    assert.equal(duplicatePayload.reason, "fresh");
+    assert.equal(calls.length, 1, "a fresh usage attempt avoids another provider request");
+  });
+});
+
+test("an admin usage refresh records a missing profile scope without blocking inference", async () => {
+  await withAdminKv(async (kv) => {
+    resetClaudeCodeModelsCacheForTest();
+    await withStubbedAnthropic(modelsOk, async () => {
+      const stored = await handleAdminClaudeCodeAuthSet(jsonRequest({ credential: "sk-ant-oat-fixture-scope-missing" }));
+      assert.equal(stored.status, 200);
+    });
+    const account = await resolveClaudeCodeAccount(kv as unknown as Kv);
+    assert(account);
+    const now = Date.now();
+    const response = await handleAdminClaudeCodeQuotaRefresh(
+      new Request("https://ai.ubq.fi/admin/providers/claude-code/quota/refresh", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ account_id: account.account_id, account_cohort_id: account.account_cohort_id }),
+      }),
+      {
+        fetcher: () =>
+          Promise.resolve(
+            Response.json({ type: "error", error: { type: "permission_error", message: "OAuth token is missing the user:profile scope" } }, { status: 403 })
+          ),
+        now: () => now,
+      }
+    );
+    assert.equal(response.status, 200, await response.clone().text());
+    const payload = await response.json();
+    assert.equal(payload.refreshed, false);
+    assert.equal(payload.reason, "scope_missing");
+    assert.match(payload.message, /user:profile/);
+    const quota = await loadClaudeCodeQuotaState(kv as unknown as Kv, account);
+    assert(quota);
+    const quotaUsage = quota.usage;
+    assert(quotaUsage);
+    assert.equal(quotaUsage.state, "scope_missing");
+    assert.equal(quotaUsage.status, 403);
+    assert.equal(quotaUsage.observed_at_ms, null);
+    assert.equal(quota.blocked_until_ms, null, "usage scope is not inference exhaustion");
+    assert.equal(quota.cooldown_until_ms, null, "usage scope does not cool down inference");
+    assert.equal(quota.last_error, null, "usage scope is not a provider routing error");
   });
 });
 

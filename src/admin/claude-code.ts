@@ -16,22 +16,16 @@ import {
   parseClaudeCodeWorkspaceId,
   partialClaudeCodeCredentialHint,
 } from "../provider/claude-code-credentials.ts";
-import {
-  claudeCodeCredentialKind,
-  fetchClaudeCodeResponses,
-  type ClaudeCodeEnvLookup,
-  type ClaudeCodeFetch,
-  type ClaudeCodeResponseClassification,
-} from "../provider/claude-code.ts";
+import { claudeCodeCredentialKind, type ClaudeCodeEnvLookup, type ClaudeCodeFetch } from "../provider/claude-code.ts";
 import {
   cacheValidatedClaudeCodeModels,
   ClaudeCodeModelsError,
   discoverClaudeCodeModels,
   type ClaudeCodeModelsSnapshot,
 } from "../provider/claude-code-models.ts";
-import { clearClaudeCodeQuotaGuards, loadClaudeCodeQuotaState, recordClaudeCodeQuotaOutcome } from "../provider/claude-code-quota.ts";
+import { clearClaudeCodeQuotaGuards } from "../provider/claude-code-quota.ts";
+import { refreshClaudeCodeUsage } from "../provider/claude-code-usage-refresh.ts";
 import { getPassiveProviderHealthSnapshot } from "../health.ts";
-import { recordClaudeCodeProviderHealth, type ProviderHealthEvent } from "../provider/health.ts";
 import {
   resolveClaudeCodeAccount,
   updateClaudeCodeAccount,
@@ -207,25 +201,10 @@ export const handleAdminClaudeCodeAuthSet = async (req: Request, options: Readon
   });
 };
 
-/** A short bounded probe; the response body is cancelled after its quota headers arrive. */
-const CLAUDE_USAGE_PROBE_TIMEOUT_MS = 15_000;
-const CLAUDE_USAGE_OBSERVATION_FRESH_MS = 60_000;
+type ClaudeUsageRefreshOptions = Readonly<{ env?: ClaudeCodeEnvLookup; fetcher?: ClaudeCodeFetch; now?: () => number }>;
+type ClaudeUsageRefreshTarget = Readonly<{ kind: "response"; response: Response }> | Readonly<{ kind: "refresh"; account: ClaudeCodeAccountBinding }>;
 
-type ClaudeUsageProbeOptions = Readonly<{ env?: ClaudeCodeEnvLookup; fetcher?: ClaudeCodeFetch; now?: () => number }>;
-type ClaudeUsageProbeTarget = Readonly<{ kind: "response"; response: Response }> | Readonly<{ kind: "probe"; account: ClaudeCodeAccountBinding; now: number }>;
-
-const latestQuotaObservationMs = (state: Awaited<ReturnType<typeof loadClaudeCodeQuotaState>>): number | null => {
-  const times = [
-    ...Object.values(state?.windows ?? {}).map((window) => window.observed_at_ms),
-    ...Object.values(state?.standard ?? {}).map((window) => window.observed_at_ms),
-  ].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  return times.length ? Math.max(...times) : null;
-};
-
-const usageProbeModel = (snapshot: ClaudeCodeModelsSnapshot | null): string | null =>
-  snapshot?.models.find((model) => /haiku/i.test(model.id))?.id ?? snapshot?.models[0]?.id ?? null;
-
-const resolveClaudeUsageProbeTarget = async (req: Request, kv: Kv, options: ClaudeUsageProbeOptions): Promise<ClaudeUsageProbeTarget> => {
+const resolveClaudeUsageRefreshTarget = async (req: Request, kv: Kv, options: ClaudeUsageRefreshOptions): Promise<ClaudeUsageRefreshTarget> => {
   const body = await readJsonBody(req);
   if (!isRecord(body) || typeof body.account_id !== "string")
     return { kind: "response", response: openaiError(400, "account_id is required", "invalid_request_error") };
@@ -235,105 +214,64 @@ const resolveClaudeUsageProbeTarget = async (req: Request, kv: Kv, options: Clau
   if (!account) return { kind: "response", response: openaiError(404, "Claude account was not found", "not_found") };
   if (body.account_cohort_id !== undefined && body.account_cohort_id !== account.account_cohort_id)
     return { kind: "response", response: openaiError(409, "Claude account generation changed", "claude_code_account_changed") };
-  const now = options.now?.() ?? Date.now();
-  const current = await loadClaudeCodeQuotaState(kv, account);
-  const observedAtMs = latestQuotaObservationMs(current);
-  if (observedAtMs !== null && now - observedAtMs < CLAUDE_USAGE_OBSERVATION_FRESH_MS) {
-    return {
-      kind: "response",
-      response: json(200, { data: await claudeSubscriptionBlock(), refreshed: false, reason: "fresh", observed_at_ms: observedAtMs }),
-    };
-  }
-  return { kind: "probe", account, now };
+  return { kind: "refresh", account };
 };
 
-const usageProbeHealthEvent = (kind: ClaudeCodeResponseClassification["kind"]): ProviderHealthEvent => {
-  switch (kind) {
-    case "ok":
-      return "success";
-    case "durable_exhaustion":
-      return "quota_exhausted";
-    case "auth_invalid":
-      return "auth_invalid";
-    case "upstream_error":
-      return "upstream_error";
-    default:
-      return "reachable";
+const runClaudeUsageRefresh = async (kv: Kv, account: ClaudeCodeAccountBinding, options: ClaudeUsageRefreshOptions): Promise<Response> => {
+  const refreshed = await refreshClaudeCodeUsage(kv, account, options);
+  if (refreshed.kind === "changed") return openaiError(409, "Claude account changed during usage refresh", "claude_code_account_changed");
+  if (refreshed.kind === "busy")
+    return json(200, {
+      data: await claudeSubscriptionBlock(),
+      refreshed: false,
+      reason: "refresh_in_progress",
+      message: "A usage refresh is already in progress.",
+    });
+  if (refreshed.kind === "fresh")
+    return json(200, {
+      data: await claudeSubscriptionBlock(),
+      refreshed: false,
+      reason: "fresh",
+      observed_at_ms: refreshed.usage.attempted_at_ms,
+      usage: refreshed.usage,
+    });
+  const { result, usage } = refreshed;
+  const data = await claudeSubscriptionBlock();
+  if (result.ok) {
+    return json(200, {
+      data,
+      refreshed: true,
+      source: "oauth_usage",
+      observed_at_ms: result.observed_at_ms,
+      usage,
+    });
   }
-};
-
-const runClaudeUsageProbe = async (kv: Kv, account: ClaudeCodeAccountBinding, now: number, options: ClaudeUsageProbeOptions): Promise<Response> => {
-  const models = await discoverClaudeCodeModels(account.credential, account.workspace?.id ?? null, {
-    fetcher: options.fetcher,
-  }).catch(() => null);
-  const model = usageProbeModel(models);
-  if (!model) return openaiError(502, "Claude models are unavailable; cannot refresh usage", "claude_usage_unavailable");
-  const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort(new DOMException("Claude usage probe timed out.", "TimeoutError"));
-  }, CLAUDE_USAGE_PROBE_TIMEOUT_MS);
-  let result: Awaited<ReturnType<typeof fetchClaudeCodeResponses>>;
-  try {
-    result = await fetchClaudeCodeResponses(
-      { model, input: ".", max_output_tokens: 1, stream: true },
-      {
-        credential: account.credential,
-        workspace: account.workspace,
-        accountBinding: account,
-        kv,
-        env: options.env,
-        fetcher: options.fetcher,
-        signal: controller.signal,
-      }
-    );
-  } catch {
-    return openaiError(502, "Claude usage refresh could not reach the upstream service", "claude_usage_unavailable");
-  } finally {
-    clearTimeout(timer);
+  if (result.kind === "scope_missing" || result.kind === "unsupported_credential") {
+    return json(200, {
+      data,
+      refreshed: false,
+      reason: result.kind,
+      message: result.message ?? "This credential cannot read Claude usage.",
+      usage,
+    });
   }
-  try {
-    await result.response.body?.cancel();
-  } catch {
-    // Quota headers are already captured; body cancellation is best effort.
-  }
-  const classification = result.classification;
-  await recordClaudeCodeQuotaOutcome(kv, {
-    binding: account,
-    model_id: model,
-    response_status: result.response.status,
-    response_observed_at_ms: result.observed_at_ms,
-    observation: result.quota,
-    exhaustion: classification.exhaustion,
-    auth_invalid: classification.kind === "auth_invalid",
-    transient: classification.kind === "transient_rate_limited" ? { retry_after_ms: classification.retry_after_ms } : null,
-    served: classification.kind === "ok",
-  });
-  await recordClaudeCodeProviderHealth(usageProbeHealthEvent(classification.kind), result.response.status, () => now, result.request_id, account).catch(
-    () => {}
-  );
-  if (classification.kind !== "ok") return openaiError(502, "Claude rejected the usage refresh; inspect the provider error state", "claude_usage_unavailable");
-  if (!result.quota) return openaiError(502, "Claude did not return quota headers", "claude_usage_unavailable");
-  return json(200, {
-    data: await claudeSubscriptionBlock(),
-    refreshed: true,
-    model,
-    observed_at_ms: result.observed_at_ms,
+  return openaiError(502, result.message ?? "Claude usage could not be read from the upstream service", "claude_usage_unavailable", {
+    headers: result.retry_after_ms === null ? undefined : { "Retry-After": String(Math.max(1, Math.ceil(result.retry_after_ms / 1_000))) },
   });
 };
 
 /**
- * Explicit operator refresh for the quota meter. The OAuth setup token cannot
- * read Anthropic's separate usage endpoint (it lacks `user:profile`), so the
- * only authoritative independent source is the unified rate-limit headers on a
- * Messages response. A 1-token streaming request is cancelled immediately after
- * headers arrive; it costs one minimal request, never a generated completion.
+ * Explicit operator refresh for the quota meter. This reads Anthropic's OAuth
+ * usage endpoint directly; it never sends a Messages request or starts a turn.
+ * A setup token without `user:profile` returns a non-fatal, explicit state so
+ * inference remains available and the missing scope is visible in diagnostics.
  */
-export const handleAdminClaudeCodeQuotaRefresh = async (req: Request, options: ClaudeUsageProbeOptions = {}): Promise<Response> => {
+export const handleAdminClaudeCodeQuotaRefresh = async (req: Request, options: ClaudeUsageRefreshOptions = {}): Promise<Response> => {
   const kv = await getKv();
   if (!kv) return openaiError(503, "Claude quota storage is unavailable", "server_error");
-  const target = await resolveClaudeUsageProbeTarget(req, kv, options);
+  const target = await resolveClaudeUsageRefreshTarget(req, kv, options);
   if (target.kind === "response") return target.response;
-  return await runClaudeUsageProbe(kv, target.account, target.now, options);
+  return await runClaudeUsageRefresh(kv, target.account, options);
 };
 
 export const handleAdminClaudeCodeAuthDelete = async (req?: Request): Promise<Response> => {
