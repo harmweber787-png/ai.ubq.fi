@@ -2434,3 +2434,11 @@ The `ubiquity/deepseek-flash` synthetic model gives its LithosAI hop the immedia
 Reason: live LithosAI headers reported a 600-request and 8,000,000-token/minute budget, while the gateway's parallel Codex agents sent large contexts that repeatedly emptied the token bucket. Three refusals also reported `402 insufficient_quota` and `the organization is out of credit`. A streamed hop could otherwise hold an open response for five waits and up to 300 seconds before the waterfall advanced, which surfaced as iOS steering timeouts. Immediate failover improves responsiveness and prevents a refused first hop from consuming the next provider's latency budget.
 
 Reversal risk: the waterfall reaches the Official DeepSeek, OpenRouter, Surplus and OpenLux hops sooner, which can change cost mix and exposes more provider churn. The order, paid pins, direct Lithos behavior and credentials are unchanged. If the provider recovers, it is eligible again on the next request.
+
+## Gateway restarts must finish inside the mobile steer retry window - 2026-10-24
+
+The VPS gateway stop timeout is 15 seconds, and HTTP shutdown closes lingering idle keep-alive sockets only after every active handler has settled. The previous 180-second stop timeout allowed a deploy to stop accepting requests for three minutes; the Codex app-server backed off through 5, 10, and 20-second retries, and the iOS client discarded pending steers after about 30 seconds.
+
+Reason: a live deploy at 23:11:17 UTC stopped the gateway listener and systemd killed the process at 23:14:17 UTC. Gateway requests during that interval failed at the transport boundary, and the mobile messages were deleted before the next successful model call. The app-server returns to service on its 20-second retry when the listener is restored within 19 seconds, so the stop and restart must complete before that retry. Active HTTP handlers still drain before lingering sockets are closed; no accounting or terminal write is bypassed by the idle-socket cleanup.
+
+Reversal risk: a longer stop timeout restores the three-minute blackout and will drop consecutive mobile steers again. Forcing all connections closed before active handlers settle would lose delivery or settlement evidence, so the close remains gated on an empty active set.
