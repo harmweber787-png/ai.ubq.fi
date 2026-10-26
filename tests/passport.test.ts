@@ -23,6 +23,8 @@ const originalFetch = globalThis.fetch;
 let exchangedToken = "";
 let exchanges: Record<string, unknown>[] = [];
 let jwksStatus = 200;
+let exchangeStatus = 200;
+let exchangeError: Error | null = null;
 
 const sign = async (overrides: Record<string, unknown> = {}, headerOverrides: Record<string, unknown> = {}): Promise<string> => {
   const now = Math.floor(Date.now() / 1000);
@@ -58,6 +60,8 @@ beforeEach(() => {
   resetPassportCacheForTest();
   exchanges = [];
   jwksStatus = 200;
+  exchangeStatus = 200;
+  exchangeError = null;
   globalThis.fetch = createFetchMock(async (input, init) => {
     const url = urlOf(input);
     if (url === `${ISSUER}/api/auth/jwks`)
@@ -66,7 +70,8 @@ beforeEach(() => {
       assert.equal(init?.method, "POST");
       assert.equal(init.redirect, "error");
       exchanges.push(JSON.parse(await new Response(init.body).text()) as Record<string, unknown>);
-      return Response.json({ accessToken: exchangedToken });
+      if (exchangeError) throw exchangeError;
+      return Response.json({ accessToken: exchangedToken }, { status: exchangeStatus });
     }
     throw new Error(`Unexpected fetch: ${url}`);
   });
@@ -207,4 +212,37 @@ test("Passport unavailable keys fail closed, proxy origin stays fixed and logout
   assert.deepEqual(logout.headers.getSetCookie(), [`${SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax`]);
   setKvForTest(kvStub);
   assert.equal((await handler(request("/admin/api-keys"))).status, 401);
+});
+
+test("Passport callback returns 401 on 4xx rejected exchange codes and preserves 502 on 5xx and transport failures", async () => {
+  for (const status of [400, 401, 403]) {
+    exchangeStatus = status;
+    const { state, stateCookie } = await begin();
+    const rejected = await handler(request(`/auth/callback?state=${state}&code=expired-code`, "", { headers: { Cookie: stateCookie } }));
+    assert.equal(rejected.status, 401);
+    const body = await rejected.json();
+    assert.equal(body.error.code, "invalid_api_key");
+    assert(rejected.headers.getSetCookie().some((cookie) => cookie.startsWith(`${STATE_COOKIE}=; Max-Age=0;`)));
+  }
+
+  exchangeStatus = 503;
+  {
+    const { state, stateCookie } = await begin();
+    const upstreamFail = await handler(request(`/auth/callback?state=${state}&code=valid-code`, "", { headers: { Cookie: stateCookie } }));
+    assert.equal(upstreamFail.status, 502);
+    const body = await upstreamFail.json();
+    assert.equal(body.error.code, "passport_unavailable");
+    assert(upstreamFail.headers.getSetCookie().some((cookie) => cookie.startsWith(`${STATE_COOKIE}=; Max-Age=0;`)));
+  }
+
+  exchangeStatus = 200;
+  exchangeError = new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  {
+    const { state, stateCookie } = await begin();
+    const timeoutFail = await handler(request(`/auth/callback?state=${state}&code=valid-code`, "", { headers: { Cookie: stateCookie } }));
+    assert.equal(timeoutFail.status, 502);
+    const body = await timeoutFail.json();
+    assert.equal(body.error.code, "passport_unavailable");
+    assert(timeoutFail.headers.getSetCookie().some((cookie) => cookie.startsWith(`${STATE_COOKIE}=; Max-Age=0;`)));
+  }
 });
