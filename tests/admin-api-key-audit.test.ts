@@ -53,6 +53,29 @@ const passkeyContext = (userId = "user-1", handle = "alice"): ApiKeyAuditContext
   request_id: "req-passkey-1",
 });
 
+const passportContext = (sub = "passport-sub-1", handle = "carol"): ApiKeyAuditContext => ({
+  auth: {
+    ok: true,
+    token: "passport-jwt-secret-never-persisted",
+    is_super_admin: false,
+    method: {
+      kind: "passport_session",
+      principal: `passport-user:${sub}`,
+      user: {
+        sub,
+        handle,
+        is_admin: true,
+        scopes: ["admin"],
+        auth: "passkey",
+        exp: 1_900_000_000,
+        jti: "jti-1",
+        agent_token_id: null,
+      },
+    },
+  },
+  request_id: "req-passport-1",
+});
+
 const sharedContext = (requestId = "req-shared-1"): ApiKeyAuditContext => ({
   auth: { ok: true, token: "unused-test-token", is_super_admin: true, method: { kind: "admin_allowlist" } },
   request_id: requestId,
@@ -104,7 +127,7 @@ test("key lifecycle writes ordered audit events with safe fields and actor attri
   await tick();
   assert.equal((await handleAdminApiKeysRevoke(revokeRequest({ id }), sharedContext())).status, 200);
   await tick();
-  assert.equal((await handleAdminApiKeysUnrevoke(unrevokeRequest({ id }), passkeyContext())).status, 200);
+  assert.equal((await handleAdminApiKeysUnrevoke(unrevokeRequest({ id }), passportContext("passport-user-42", "carol"))).status, 200);
   await tick();
   assert.equal((await handleAdminApiKeysRevoke(revokeRequest({ id }), sharedContext())).status, 200);
   await tick();
@@ -145,6 +168,14 @@ test("key lifecycle writes ordered audit events with safe fields and actor attri
   assert.equal(updateEvent.changed.usage_limit_requests, 3);
   assert.equal(updateEvent.changed.name, "Audit key renamed");
 
+  const unrevokeEvent = events.find((event) => event.action === "unrevoke");
+  assert.ok(unrevokeEvent);
+  assert.equal(unrevokeEvent.actor.kind, "passport_user");
+  assert.equal(unrevokeEvent.actor.principal_id, "passport-user-42");
+  assert.equal(unrevokeEvent.actor.principal_label, "carol");
+  assert.equal(unrevokeEvent.actor.is_super_admin, false);
+  assert.equal(unrevokeEvent.request_id, "req-passport-1");
+
   const deleteEvent = events.find((event) => event.action === "delete");
   assert.ok(deleteEvent);
   assert.equal(deleteEvent.actor.kind, "passkey_user");
@@ -153,6 +184,7 @@ test("key lifecycle writes ordered audit events with safe fields and actor attri
   // No token, token hash, Authorization header, prompt or raw error is ever served.
   const serialized = JSON.stringify(body);
   assert.equal(serialized.includes(createdToken), false);
+  assert.equal(serialized.includes("passport-jwt-secret-never-persisted"), false);
   assert.equal(/authorization|bearer|token_hash|prompt|"hash"|"error"/i.test(serialized), false);
 });
 

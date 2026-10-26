@@ -16,11 +16,27 @@ const encodeAuditValue = (value: unknown): unknown => {
   return value;
 };
 
-const auditAuth = (kind: string, isSuperAdmin = false): NonNullable<audit.ApiKeyAuditContext["auth"]> =>
+const auditAuth = (kind: string, isSuperAdmin = false, handle = "synthetic-handle"): NonNullable<audit.ApiKeyAuditContext["auth"]> =>
   ({
     ok: true,
     token: "synthetic-secret-never-persisted",
-    method: { kind, user_id: "synthetic-user", handle: "synthetic-handle", is_admin: true, credential_count: 1 },
+    method:
+      kind === "passport_session"
+        ? {
+            kind: "passport_session",
+            principal: "passport-user:synthetic-passport-sub",
+            user: {
+              sub: "synthetic-passport-sub",
+              handle,
+              is_admin: true,
+              scopes: ["admin"],
+              auth: "passkey",
+              exp: 1_900_000_000,
+              jti: "synthetic-jti",
+              agent_token_id: null,
+            },
+          }
+        : { kind, user_id: "synthetic-user", handle, is_admin: true, credential_count: 1 },
     is_super_admin: isSuperAdmin,
   }) as NonNullable<audit.ApiKeyAuditContext["auth"]>;
 
@@ -108,7 +124,11 @@ export const runApiKeyAuditVectors = (decisions: AuditDecisions = audit): Record
   rows.actors = [
     undefined,
     { ok: false as const, response: new Response() },
-    ...["passkey_session", "disabled", "admin_allowlist", "deno_deploy_token", "other"].flatMap((kind) => [auditAuth(kind), auditAuth(kind, true)]),
+    ...["passkey_session", "passport_session", "disabled", "admin_allowlist", "deno_deploy_token", "other"].flatMap((kind) => [
+      auditAuth(kind),
+      auditAuth(kind, true),
+    ]),
+    auditAuth("passport_session", false, "   "),
   ].map((auth) => decisions.apiKeyChangeActorFromAuth(auth));
   const inherited: Record<string, unknown> = Object.create({ name: "inherited-must-drop" });
   Object.defineProperty(inherited, "token", {
@@ -228,6 +248,8 @@ test("native audit sanitization preserves own scalar values and source allowlist
     [
       "passkey_user",
       "passkey_user",
+      "passport_user",
+      "passport_user",
       "local_admin",
       "local_admin",
       "shared_admin_credential",
@@ -236,8 +258,21 @@ test("native audit sanitization preserves own scalar values and source allowlist
       "shared_admin_credential",
       "shared_admin_credential",
       "shared_admin_credential",
+      "passport_user",
     ]
   );
+  assert.deepEqual(actors[4], {
+    kind: "passport_user",
+    principal_id: "synthetic-passport-sub",
+    principal_label: "synthetic-handle",
+    is_super_admin: false,
+  });
+  assert.deepEqual(actors[actors.length - 1], {
+    kind: "passport_user",
+    principal_id: "synthetic-passport-sub",
+    principal_label: null,
+    is_super_admin: false,
+  });
   assert.equal(JSON.stringify(actors).includes("synthetic-secret"), false);
 });
 

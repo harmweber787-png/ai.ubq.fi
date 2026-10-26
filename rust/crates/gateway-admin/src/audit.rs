@@ -35,6 +35,14 @@ pub fn actor(principal: &AuthPrincipal) -> ChangeActor {
         AuthMethod::PasskeySession {
             user_id, handle, ..
         } => ("passkey_user", Some(user_id.clone()), Some(handle.clone())),
+        AuthMethod::PassportSession { claims } | AuthMethod::PassportBearer { claims } => {
+            let handle = claims.handle.trim();
+            (
+                "passport_user",
+                Some(claims.sub.clone()),
+                (!handle.is_empty()).then(|| handle.to_owned()),
+            )
+        }
         AuthMethod::Disabled => ("local_admin", None, None),
         _ => ("shared_admin_credential", None, None),
     };
